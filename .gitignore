@@ -3,3 +3,4 @@ jobs/
 .env
 app.log
 __pycache__/
+uvicorn.log
