@@ -1,56 +1,92 @@
 # Chapter Splitter
 
-Upload a book/textbook PDF through a web page; get back one **PDF** and one
-**Markdown** file per chapter, individually or as a single ZIP.
+Upload a book or textbook PDF through a web page; get back **one PDF and one
+Markdown file per chapter**, individually or as a single ZIP.
 
-Built for born-digital PDFs (selectable text). Scanned PDFs are rejected
-with a clear message — no OCR support yet.
+## Why
+
+LLMs work better with a chapter than with a whole book:
+
+- **It fits.** A 500-page textbook is roughly 300–500k tokens — bigger than
+  most context windows. A chapter almost always fits with room to spare for
+  your actual conversation.
+- **It's cheaper.** You pay per token. Re-sending 480 irrelevant pages to ask
+  about Chapter 3 is wasted spend on every single message.
+- **It's more accurate.** Even models that *can* hold a whole book get less
+  precise as context grows — relevant details get diluted by hundreds of
+  pages of noise. A chapter is a semantically coherent unit: everything in
+  it is about the same topic, which is exactly what you want grounding a
+  question.
+
+Chapters are also the natural chunk boundary — splitting at them beats
+splitting at arbitrary page or token counts, because you never cut an
+explanation in half.
+
+So: split the book once, then attach just the chapter you're working with.
+The Markdown output is ideal for pasting into a prompt; the per-chapter PDF
+is ideal for attaching to apps that accept files.
+
+## Using it
+
+1. Open the app and drop in a book PDF (born-digital, up to 200 MB).
+2. Wait while it detects chapters and splits — progress is shown live.
+3. Download what you need: per-chapter **PDF**, per-chapter **MD**, or
+   everything as one ZIP. Files are named `01 - Chapter Title.pdf` etc.
+
+Scanned (image-only) PDFs are rejected with a clear message — there's no OCR
+support yet. Password-protected PDFs must be decrypted first.
 
 ## How it works
 
 ```
 upload.pdf ──► detect chapters ──► split PDFs ──► extract Markdown ──► ZIP
                   │
-                  ├─ 1. embedded PDF bookmarks (free, exact)
-                  └─ 2. fallback: Gemini reads the first ~20 pages (TOC),
-                       proposes chapters; start pages located by searching
-                       for headings, calibrated by printed-page offset
+                  ├─ 1. embedded PDF bookmarks (free, exact, no AI)
+                  └─ 2. fallback: Gemini reads the first ~20 pages (the
+                       table of contents), proposes chapter titles; start
+                       pages are located by searching for the headings,
+                       calibrated by printed-page offset
 ```
 
 - **Backend:** FastAPI ([main.py](main.py)) + PyMuPDF ([splitter.py](splitter.py))
-- **Frontend:** single static page ([static/index.html](static/index.html)) that
-  uploads, polls `GET /jobs/{id}`, and renders download links
-- **Jobs:** each upload gets `jobs/<uuid>/` with `upload.pdf`, `chapters/`,
-  `chapters.zip`, and `status.json` (results survive restarts). Jobs older
+- **Frontend:** a single static page ([static/index.html](static/index.html))
+  that uploads, polls `GET /jobs/{id}`, and renders download links
+- **Jobs:** each upload gets `jobs/<uuid>/` with the source PDF, the chapter
+  files, the ZIP, and a `status.json` (results survive restarts). Jobs older
   than 7 days are purged on startup.
-- **AI fallback model:** `gemini-2.5-flash` via `google-genai`, key in `.env`
-  (`GEMINI_API_KEY=...`). Only called when a PDF has no usable bookmarks.
+- **AI fallback model:** `gemini-2.5-flash` via `google-genai`. Only called
+  when a PDF has no usable bookmarks — most published textbooks have them,
+  so most splits never touch an LLM.
 
 ## API
 
 | Route | What it does |
 | --- | --- |
-| `POST /upload` (multipart `file`) | Validates (PDF magic bytes, ≤200 MB), queues job, returns `{job_id}` |
+| `POST /upload` (multipart `file`) | Validates (PDF magic bytes, ≤200 MB), queues a job, returns `{job_id}` |
 | `GET /jobs/{id}` | `{status: queued\|working\|done\|error, stage?, error?, chapters?}` |
 | `GET /jobs/{id}/files/{name}` | Download one chapter file (manifest-checked names only) |
 | `GET /jobs/{id}/zip` | Download everything as `<book>-chapters.zip` |
 | `GET /` | The UI |
 
-## Error handling
-
-No silent failures:
-- Expected problems (scanned PDF, encrypted PDF, no chapter structure found)
-  surface as readable messages in the UI.
-- Unexpected crashes are logged to `app.log` **and** trigger an SMS alert
-  via the `zo` CLI.
-
-## Running
+## Self-hosting
 
 ```bash
+git clone https://github.com/tedico/chapter-splitter && cd chapter-splitter
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-echo 'GEMINI_API_KEY=...' > .env
+echo 'GEMINI_API_KEY=your-key-here' > .env   # only needed for bookmark-less PDFs
 .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765
 ```
 
-On Zo it runs as a registered user service (label `chapter-splitter`,
-port 8765), which gives it a stable URL and restarts it automatically.
+Then open `http://localhost:8765`. To try it without a real book,
+`make_fixtures.py` generates small test PDFs (one with bookmarks, one with
+only a printed TOC).
+
+## Error handling
+
+No silent failures:
+
+- Expected problems (scanned PDF, encrypted PDF, no chapter structure found,
+  AI service overloaded) surface as readable messages in the UI.
+- Unexpected crashes are logged to `app.log` and trigger an alert (SMS via
+  the [Zo](https://zo.computer) CLI in my deployment — swap `alert_sms()` in
+  [main.py](main.py) for whatever channel you use).
