@@ -3,28 +3,42 @@
 Upload a book or textbook PDF through a web page; get back **one PDF and one
 Markdown file per chapter**, individually or as a single ZIP.
 
-## Why
+## Why this exists
 
-LLMs work better with a chapter than with a whole book:
+I built this because I kept wanting to work through textbooks with an LLM —
+and feeding it the whole book is the wrong move. **A chapter is the right
+unit of context.** Here's the reasoning:
 
 - **It fits.** A 500-page textbook is roughly 300–500k tokens — bigger than
-  most context windows. A chapter almost always fits with room to spare for
+  most context windows. A chapter almost always fits, with room to spare for
   your actual conversation.
-- **It's cheaper.** You pay per token. Re-sending 480 irrelevant pages to ask
-  about Chapter 3 is wasted spend on every single message.
-- **It's more accurate.** Even models that *can* hold a whole book get less
-  precise as context grows — relevant details get diluted by hundreds of
-  pages of noise. A chapter is a semantically coherent unit: everything in
-  it is about the same topic, which is exactly what you want grounding a
-  question.
+- **It's cheaper.** You pay per input token, and in a chat the attached
+  context is re-sent with every message. Ask ten questions about Chapter 3
+  with the whole book attached and you've paid for the other 480 pages ten
+  times over.
+- **It's more accurate.** Even models that *can* hold an entire book get
+  measurably worse at recalling specifics as context grows — the relevant
+  details get diluted across hundreds of pages of unrelated material. A
+  chapter is a semantically coherent unit: nearly every token in context is
+  actually about your topic. This is the same logic behind why RAG systems
+  chunk documents at semantic boundaries.
 
-Chapters are also the natural chunk boundary — splitting at them beats
-splitting at arbitrary page or token counts, because you never cut an
-explanation in half.
+Chapters also beat fixed-size chunking (every N pages or tokens) because the
+split points are the ones the author chose — an explanation never gets cut
+in half.
 
-So: split the book once, then attach just the chapter you're working with.
-The Markdown output is ideal for pasting into a prompt; the per-chapter PDF
-is ideal for attaching to apps that accept files.
+So the workflow is: **split the book once, then attach just the chapter
+you're working with.** The Markdown output is ideal for pasting straight
+into a prompt; the per-chapter PDF is ideal for apps that take file
+attachments.
+
+### When a single chapter isn't enough
+
+Honest caveats: questions that synthesize across the book ("how does the
+argument develop?") genuinely need multiple chapters — attach several, or
+fall back to a long-context model with the full book. And for some dense
+textbooks, a *section* would be tighter still; chapters are simply the best
+default boundary.
 
 ## Using it
 
