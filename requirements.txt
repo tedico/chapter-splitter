@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pymupdf
+pymupdf4llm
+google-genai
