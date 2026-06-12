@@ -42,13 +42,36 @@ default boundary.
 
 ## Using it
 
-1. Open the app and drop in a book PDF (born-digital, up to 200 MB).
+1. Open the app and drop in a book PDF (up to 200 MB) — born-digital or
+   scanned; scanned pages get an OCR text layer automatically.
 2. Wait while it detects chapters and splits — progress is shown live.
 3. Download what you need: per-chapter **PDF**, per-chapter **MD**, or
    everything as one ZIP. Files are named `01 - Chapter Title.pdf` etc.
 
-Scanned (image-only) PDFs are rejected with a clear message — there's no OCR
-support yet. Password-protected PDFs must be decrypted first.
+Password-protected PDFs must be decrypted first.
+
+### Scanned books
+
+Books come in three flavors, and all three work:
+
+- **Born-digital** — real selectable text. The fast path.
+- **Image-only scans** — every page is a picture. The app detects the
+  textless pages and runs [OCRmyPDF](https://ocrmypdf.readthedocs.io/)
+  (Tesseract) on exactly those pages before splitting. Expect a few extra
+  minutes for a full book.
+- **Searchable scans / hybrids** — scans with an existing (often partial)
+  invisible OCR text layer. Pages that already have text are kept as-is;
+  only the truly textless ones are OCR'd (`--force-ocr --pages`, with the
+  page list computed by the app — ocrmypdf's own `--skip-text` would skip
+  any page carrying even a stray header fragment).
+
+For scan pages, Markdown extraction uses the text layer directly instead of
+pymupdf4llm: OCR text layers are *invisible* (alpha 0), which pymupdf4llm
+drops — it would otherwise slowly re-OCR each page image with scrambled
+layout. The manifest records which path produced each chapter
+(`md_source: "structured" | "text-layer"`). Scanned chapters therefore give
+plain text rather than structured Markdown — honest output beats pretty
+garbage.
 
 ## How it works
 
@@ -99,7 +122,7 @@ only a printed TOC).
 
 No silent failures:
 
-- Expected problems (scanned PDF, encrypted PDF, no chapter structure found,
+- Expected problems (OCR failure, encrypted PDF, no chapter structure found,
   AI service overloaded) surface as readable messages in the UI.
 - Unexpected crashes are logged to `app.log` and trigger an alert (SMS via
   the [Zo](https://zo.computer) CLI in my deployment — swap `alert_sms()` in

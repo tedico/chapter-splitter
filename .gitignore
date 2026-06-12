@@ -4,3 +4,4 @@ jobs/
 app.log
 __pycache__/
 uvicorn.log
+test-inputs/

@@ -17,6 +17,8 @@ import logging
 import os
 import re
 import statistics
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +31,14 @@ GEMINI_MODEL = "gemini-2.5-flash"
 TOC_SCAN_PAGES = 20          # pages sent to Gemini in fallback mode
 MIN_CHAPTERS = 2             # fewer than this -> detection considered failed
 SCANNED_TEXT_THRESHOLD = 40  # avg chars/page below this -> "looks scanned"
+TEXTLESS_PAGE_CHARS = 50     # page text at/below this -> no usable text layer
+MIN_OCR_PAGES = 3            # OCR only when at least this many pages need it
+OCR_TIMEOUT_S = 3 * 60 * 60
+OFFSET_DRIFT_TOLERANCE = 5   # pages a heading match may deviate from the
+                             # printed-page offset before it's a false match
+OCR_FILENAME = "_ocr.pdf"
+SCAN_IMAGE_COVERAGE = 0.5    # image covering this much of a page -> scan page
+SCAN_CHAPTER_FRACTION = 0.6  # chapter mostly scan pages -> use text layer
 
 
 class SplitError(Exception):
@@ -59,9 +69,76 @@ def _reject_scanned(doc: fitz.Document) -> None:
     chars = [len(doc[p].get_text()) for p in sample]
     if statistics.mean(chars) < SCANNED_TEXT_THRESHOLD:
         raise SplitError(
-            "This PDF has little or no selectable text — it looks scanned. "
-            "Only born-digital PDFs are supported right now."
+            "This PDF has little or no selectable text, even after OCR — "
+            "it may be a very low-quality scan."
         )
+
+
+def _page_ranges(pages: list[int]) -> str:
+    """Compress 0-based page indexes into a 1-based ocrmypdf --pages arg."""
+    runs: list[list[int]] = []
+    for p in pages:
+        if runs and p == runs[-1][1] + 1:
+            runs[-1][1] = p
+        else:
+            runs.append([p, p])
+    return ",".join(f"{a+1}" if a == b else f"{a+1}-{b+1}" for a, b in runs)
+
+
+def _textless_pages(doc: fitz.Document) -> list[int]:
+    return [
+        p for p in range(doc.page_count)
+        if len(doc[p].get_text().strip()) <= TEXTLESS_PAGE_CHARS
+    ]
+
+
+def ensure_text_layer(pdf_path: Path, work_dir: Path, on_progress) -> Path:
+    """Give scanned pages a text layer so the rest of the pipeline works.
+
+    Pages that already have text are left untouched (ocrmypdf --skip-text),
+    so this handles both fully scanned books and hybrids where only some
+    pages lack text. A handful of textless pages (blanks, photo plates) is
+    normal and not worth an OCR pass. Returns ``pdf_path`` unchanged or the
+    path of the OCR'd copy in ``work_dir``.
+    """
+    with fitz.open(pdf_path) as doc:
+        page_count = doc.page_count
+        missing = _textless_pages(doc)
+    if len(missing) < max(MIN_OCR_PAGES, page_count // 50):
+        return pdf_path
+
+    on_progress(
+        f"Running OCR on {len(missing)} scanned pages (of {page_count}) — "
+        "this can take several minutes…"
+    )
+    work_dir.mkdir(parents=True, exist_ok=True)
+    ocr_path = work_dir / OCR_FILENAME
+    # Name the pages explicitly: --skip-text would skip any page containing
+    # even a stray fragment of text (a page number, a running header), which
+    # is exactly what half-OCR'd scans have on their unreadable pages.
+    cmd = [
+        sys.executable, "-m", "ocrmypdf",
+        "--force-ocr", "--pages", _page_ranges(missing),
+        "--output-type", "pdf", "--optimize", "0", "--quiet",
+        str(pdf_path), str(ocr_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=OCR_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise SplitError(
+            "OCR timed out on this PDF — it may be unusually large or complex."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        logger.error(
+            "ocrmypdf failed (rc=%s): %s",
+            exc.returncode, exc.stderr.decode(errors="replace")[-2000:],
+        )
+        raise SplitError(
+            "This PDF contains scanned pages and OCR failed on it. "
+            "The failure has been logged."
+        ) from exc
+    logger.info("OCR added a text layer to %d pages", len(missing))
+    return ocr_path
 
 
 def _from_bookmarks(doc: fitz.Document) -> list[Chapter] | None:
@@ -223,7 +300,14 @@ def _locate_chapters(
     if len(found) >= MIN_CHAPTERS:
         offsets = [pdf - (printed - 1) for pdf, _, printed in found]
         offset = round(statistics.median(offsets))
-        located = {title: pdf for pdf, title, _ in found}
+        # A heading text match can be a false positive — books often repeat
+        # chapter titles in an introduction. True starts agree with the
+        # printed-page offset; outliers get re-placed by the offset instead.
+        located = {
+            title: pdf
+            for pdf, title, printed in found
+            if abs(pdf - (printed - 1) - offset) <= OFFSET_DRIFT_TOLERANCE
+        }
         starts = []
         for title, printed in guesses:
             page = located.get(title, printed - 1 + offset)
@@ -242,6 +326,50 @@ def _locate_chapters(
 
 # ----------------------------------------------------------------- output
 
+def _is_scan_page(page: fitz.Page) -> bool:
+    area = abs(page.rect)
+    if not area:
+        return False
+    covered = 0.0
+    for info in page.get_image_info():
+        covered += abs(fitz.Rect(info["bbox"]) & page.rect)
+        if covered / area >= SCAN_IMAGE_COVERAGE:
+            return True
+    return False
+
+
+def _is_scan_chapter(doc: fitz.Document, ch: Chapter) -> bool:
+    pages = range(ch.start, ch.end)
+    scan = sum(1 for p in pages if _is_scan_page(doc[p]))
+    return scan >= SCAN_CHAPTER_FRACTION * len(pages)
+
+
+_MD_PLACEHOLDER = re.compile(r"\*\*==>.*?<==\*\*")
+
+
+def _alnum_len(text: str) -> int:
+    return sum(c.isalnum() for c in text)
+
+
+def _chapter_plain_text(doc: fitz.Document, ch: Chapter) -> str:
+    return "\n".join(
+        doc[p].get_text("text").strip() for p in range(ch.start, ch.end)
+    )
+
+
+def _markdown_is_degenerate(md: str, plain_text: str) -> bool:
+    """True when pymupdf4llm produced placeholders instead of the page text.
+
+    Happens on scanned pages: OCR text layers are invisible (alpha 0), and
+    pymupdf4llm drops invisible spans, leaving only picture placeholders —
+    while plain get_text() still reads them.
+    """
+    plain = _alnum_len(plain_text)
+    if plain < 500:  # near-empty pages; structured output is fine
+        return False
+    return _alnum_len(_MD_PLACEHOLDER.sub("", md)) < 0.3 * plain
+
+
 def _safe_filename(title: str, max_len: int = 60) -> str:
     safe = re.sub(r"[^\w\s.,()'-]", "", title).strip()
     safe = re.sub(r"\s+", " ", safe)
@@ -258,18 +386,20 @@ def split_book(
     Returns a manifest dict: {"method": ..., "chapters": [{title, start_page,
     end_page, pdf, md}]} with 1-based page numbers for display.
     """
-    doc = fitz.open(pdf_path)
-    try:
-        if doc.needs_pass:
+    with fitz.open(pdf_path) as probe:
+        if probe.needs_pass:
             raise SplitError("This PDF is password-protected — please decrypt it first.")
-        if doc.page_count < 2:
+        if probe.page_count < 2:
             raise SplitError("This PDF has fewer than 2 pages — nothing to split.")
 
+    src_path = ensure_text_layer(pdf_path, out_dir, on_progress)
+    doc = fitz.open(src_path)
+    try:
         on_progress("Detecting chapters…")
         chapters, method = detect_chapters(doc)
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        manifest = {"method": method, "chapters": []}
+        manifest = {"method": method, "ocr": src_path != pdf_path, "chapters": []}
         for i, ch in enumerate(chapters):
             on_progress(f"Writing chapter {i + 1} of {len(chapters)}: {ch.title}")
             stem = f"{i:02d} - {_safe_filename(ch.title)}"
@@ -279,9 +409,21 @@ def split_book(
             part.save(out_dir / f"{stem}.pdf")
             part.close()
 
-            md = pymupdf4llm.to_markdown(
-                doc, pages=list(range(ch.start, ch.end)), show_progress=False
-            )
+            plain_text = _chapter_plain_text(doc, ch)
+            if _is_scan_chapter(doc, ch):
+                # pymupdf4llm mishandles scan pages: it drops the invisible
+                # OCR text layer and slowly re-OCRs the page images with
+                # scrambled layout. The text layer is the honest output.
+                md = f"# {ch.title}\n\n{plain_text}\n"
+                md_source = "text-layer"
+            else:
+                md = pymupdf4llm.to_markdown(
+                    doc, pages=list(range(ch.start, ch.end)), show_progress=False
+                )
+                md_source = "structured"
+                if _markdown_is_degenerate(md, plain_text):
+                    md = f"# {ch.title}\n\n{plain_text}\n"
+                    md_source = "text-layer"
             (out_dir / f"{stem}.md").write_text(md, encoding="utf-8")
 
             manifest["chapters"].append(
@@ -291,6 +433,7 @@ def split_book(
                     "end_page": ch.end,
                     "pdf": f"{stem}.pdf",
                     "md": f"{stem}.md",
+                    "md_source": md_source,
                 }
             )
         return manifest
