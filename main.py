@@ -108,7 +108,7 @@ def _purge_old_jobs() -> None:
 executor = ThreadPoolExecutor(max_workers=1)
 
 
-def _process_job(job_id: str, filename: str, redo_ocr: bool) -> None:
+def _process_job(job_id: str, filename: str, redo_ocr: bool, ai_markdown: bool) -> None:
     job_dir = JOBS_DIR / job_id
     pdf_path = job_dir / "upload.pdf"
     out_dir = job_dir / "chapters"
@@ -118,7 +118,10 @@ def _process_job(job_id: str, filename: str, redo_ocr: bool) -> None:
 
     try:
         progress("Opening PDF…")
-        manifest = split_book(pdf_path, out_dir, on_progress=progress, redo_ocr=redo_ocr)
+        manifest = split_book(
+            pdf_path, out_dir,
+            on_progress=progress, redo_ocr=redo_ocr, ai_markdown=ai_markdown,
+        )
 
         progress("Packaging ZIP…")
         zip_path = job_dir / "chapters.zip"
@@ -158,7 +161,11 @@ _purge_old_jobs()
 
 
 @app.post("/upload")
-async def upload(file: UploadFile, redo_ocr: bool = Form(False)):
+async def upload(
+    file: UploadFile,
+    redo_ocr: bool = Form(False),
+    ai_markdown: bool = Form(False),
+):
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "File is larger than 200 MB.")
@@ -172,7 +179,7 @@ async def upload(file: UploadFile, redo_ocr: bool = Form(False)):
 
     filename = Path(file.filename or "book.pdf").name
     _write_status(job_id, {"status": "queued", "filename": filename})
-    executor.submit(_process_job, job_id, filename, redo_ocr)
+    executor.submit(_process_job, job_id, filename, redo_ocr, ai_markdown)
     return {"job_id": job_id}
 
 

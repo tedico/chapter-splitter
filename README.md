@@ -74,8 +74,21 @@ a 631-page textbook took ~31 minutes, and produced `Cayley-Hamilton` and
 `DIAGONALIZATION` where the original layer had garbage. The job runs in the
 background; closing the page doesn't cancel it.
 
-For scan pages, Markdown extraction uses the text layer directly instead of
-pymupdf4llm: OCR text layers are *invisible* (alpha 0), which pymupdf4llm
+**AI Markdown toggle:** for the best Markdown from scans, *"AI Markdown for
+scanned pages"* sends each scan chapter's page images to Gemini in batches
+of 8 and gets back real structure — section headings, paragraphs, tables,
+and TeX math — instead of raw OCR text. Costs Gemini credits (well under $1
+for a full book with `gemini-2.5-flash`). Any batch that fails after three
+attempts silently falls back to the text layer for that chapter, so API
+weather can degrade quality but never fail a job. The manifest records
+which chapters used it (`md_source: "ai-vision"`).
+
+**OCR language:** Tesseract defaults to English; set the `OCR_LANGUAGES`
+environment variable (e.g. `eng+Devanagari`) for books in other scripts —
+the corresponding `tesseract-ocr-script-*` package must be installed.
+
+For scan pages, Markdown extraction (without the AI toggle) uses the text
+layer directly instead of pymupdf4llm: OCR text layers are *invisible* (alpha 0), which pymupdf4llm
 drops — it would otherwise slowly re-OCR each page image with scrambled
 layout. The manifest records which path produced each chapter
 (`md_source: "structured" | "text-layer"`). Scanned chapters therefore give

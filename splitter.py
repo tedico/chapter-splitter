@@ -19,6 +19,7 @@ import re
 import statistics
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,8 @@ SCANNED_TEXT_THRESHOLD = 40  # avg chars/page below this -> "looks scanned"
 TEXTLESS_PAGE_CHARS = 50     # page text at/below this -> no usable text layer
 MIN_OCR_PAGES = 3            # OCR only when at least this many pages need it
 OCR_TIMEOUT_S = 3 * 60 * 60
+VISION_DPI = 130             # page-image resolution sent to Gemini
+VISION_BATCH_PAGES = 8       # pages per Gemini vision request
 OFFSET_DRIFT_TOLERANCE = 5   # pages a heading match may deviate from the
                              # printed-page offset before it's a false match
 OCR_FILENAME = "_ocr.pdf"
@@ -142,6 +145,7 @@ def ensure_text_layer(
     cmd = [
         sys.executable, "-m", "ocrmypdf",
         *mode_args,
+        "--language", os.environ.get("OCR_LANGUAGES", "eng"),
         "--output-type", "pdf", "--optimize", "0", "--quiet",
         str(pdf_path), str(ocr_path),
     ]
@@ -242,17 +246,22 @@ def _from_gemini(doc: fitz.Document) -> list[Chapter]:
         '"back_matter": {"title": str, "printed_page": int} | null}\n\n'
         + head_text
     )
-    try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config={"response_mime_type": "application/json"},
-        )
-    except genai_errors.APIError as exc:
-        raise SplitError(
-            "The AI service is temporarily unavailable (high demand). "
-            "Please try again in a few minutes."
-        ) from exc
+    for attempt in (1, 2, 3):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config={"response_mime_type": "application/json"},
+            )
+            break
+        except genai_errors.APIError as exc:
+            logger.warning("chapter detection attempt %d failed: %s", attempt, exc)
+            if attempt == 3:
+                raise SplitError(
+                    "The AI service is temporarily unavailable (high demand). "
+                    "Please try again in a few minutes."
+                ) from exc
+            time.sleep(5 * attempt)
     try:
         data = json.loads(response.text)
         guesses = [
@@ -409,6 +418,73 @@ def _markdown_is_degenerate(md: str, plain_text: str) -> bool:
     return _alnum_len(_MD_PLACEHOLDER.sub("", md)) < 0.3 * plain
 
 
+def _gemini_vision_markdown(doc: fitz.Document, ch: Chapter, on_progress) -> str | None:
+    """Markdown for a scan chapter, transcribed from page images by Gemini.
+
+    Returns None on any persistent failure — the caller falls back to the
+    text layer, so a flaky API can degrade quality but never fail a job.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+
+    from google import genai
+    from google.genai import errors as genai_errors
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        "These images are consecutive pages of one book chapter. Transcribe "
+        "them into clean Markdown: use ## for section headings (# is "
+        "reserved for the chapter title), normal paragraphs, Markdown lists "
+        "and tables, and TeX ($...$) for mathematical notation. Skip "
+        "running headers, footers, and page numbers. Transcribe figure "
+        "captions but do not describe the figures themselves. Do not "
+        "repeat the chapter title as a heading — start directly with the "
+        "body (or the first section heading). Output only the Markdown — "
+        "no commentary, no code fences."
+    )
+
+    pages = list(range(ch.start, ch.end))
+    chunks: list[str] = []
+    for i in range(0, len(pages), VISION_BATCH_PAGES):
+        batch = pages[i:i + VISION_BATCH_PAGES]
+        on_progress(
+            f"AI Markdown for \u201c{ch.title}\u201d: "
+            f"page {i + 1} of {len(pages)}…"
+        )
+        parts: list = [prompt]
+        for p in batch:
+            pix = doc[p].get_pixmap(dpi=VISION_DPI)
+            try:
+                img = pix.tobytes("jpeg")
+                mime = "image/jpeg"
+            except (ValueError, RuntimeError):
+                img = pix.tobytes("png")
+                mime = "image/png"
+            parts.append(types.Part.from_bytes(data=img, mime_type=mime))
+
+        text = None
+        for attempt in (1, 2, 3):
+            try:
+                response = client.models.generate_content(
+                    model=GEMINI_MODEL, contents=parts
+                )
+                text = (response.text or "").strip()
+                break
+            except genai_errors.APIError as exc:
+                logger.warning(
+                    "vision markdown failed for %r pages %s-%s (attempt %d): %s",
+                    ch.title, batch[0] + 1, batch[-1] + 1, attempt, exc,
+                )
+                if attempt < 3:
+                    time.sleep(10 * attempt)
+        if not text:
+            return None
+        chunks.append(text)
+    return f"# {ch.title}\n\n" + "\n\n".join(chunks) + "\n"
+
+
 def _safe_filename(title: str, max_len: int = 60) -> str:
     safe = re.sub(r"[^\w\s.,()'-]", "", title).strip()
     safe = re.sub(r"\s+", " ", safe)
@@ -420,6 +496,7 @@ def split_book(
     out_dir: Path,
     on_progress=lambda stage: None,
     redo_ocr: bool = False,
+    ai_markdown: bool = False,
 ) -> dict:
     """Split ``pdf_path`` into per-chapter PDFs + Markdown in ``out_dir``.
 
@@ -453,9 +530,16 @@ def split_book(
             if _is_scan_chapter(doc, ch):
                 # pymupdf4llm mishandles scan pages: it drops the invisible
                 # OCR text layer and slowly re-OCRs the page images with
-                # scrambled layout. The text layer is the honest output.
-                md = f"# {ch.title}\n\n{plain_text}\n"
-                md_source = "text-layer"
+                # scrambled layout. Transcribe with Gemini vision when asked
+                # to; otherwise the text layer is the honest output.
+                md = (
+                    _gemini_vision_markdown(doc, ch, on_progress)
+                    if ai_markdown else None
+                )
+                md_source = "ai-vision"
+                if md is None:
+                    md = f"# {ch.title}\n\n{plain_text}\n"
+                    md_source = "text-layer"
             else:
                 md = pymupdf4llm.to_markdown(
                     doc, pages=list(range(ch.start, ch.end)), show_progress=False

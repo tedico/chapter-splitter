@@ -73,6 +73,10 @@
     <input type="checkbox" id="redo">
     Re-OCR scanned pages for cleaner text (slow — up to ~30 min for a big book)
   </label>
+  <label class="opt">
+    <input type="checkbox" id="aimd">
+    AI Markdown for scanned pages (best quality; uses Gemini credits — well under $1 per book)
+  </label>
 
   <div id="progress" class="card hidden">
     <span class="spinner"></span><span id="stage">Uploading…</span>
@@ -143,6 +147,7 @@ async function start(file) {
   const form = new FormData();
   form.append('file', file);
   form.append('redo_ocr', document.getElementById('redo').checked);
+  form.append('ai_markdown', document.getElementById('aimd').checked);
   let res;
   try {
     res = await fetch('upload', { method: 'POST', body: form });
@@ -178,10 +183,13 @@ function poll(jobId) {
 function render(jobId, job) {
   document.getElementById('result-title').textContent =
     job.filename + ' — ' + job.chapters.length + ' chapters';
-  document.getElementById('result-meta').textContent =
-    job.method === 'bookmarks'
-      ? 'Chapters detected from the PDF’s embedded bookmarks.'
-      : 'Chapters detected by AI from the table of contents.';
+  let meta = job.method === 'bookmarks'
+    ? 'Chapters detected from the PDF’s embedded bookmarks.'
+    : 'Chapters detected by AI from the table of contents.';
+  if (job.ocr) meta += ' OCR was applied to scanned pages.';
+  if (job.chapters.some(ch => ch.md_source === 'ai-vision'))
+    meta += ' Markdown transcribed by AI from page images.';
+  document.getElementById('result-meta').textContent = meta;
   const table = document.getElementById('chapters');
   table.innerHTML = '';
   for (const ch of job.chapters) {
@@ -191,7 +199,7 @@ function render(jobId, job) {
       '<td>' + escapeHtml(ch.title) + '</td>' +
       '<td class="pages">p. ' + ch.start_page + '–' + ch.end_page + '</td>' +
       '<td class="dl"><a href="' + fileUrl(ch.pdf) + '">PDF</a> · ' +
-      '<a href="' + fileUrl(ch.md) + '">MD</a></td>';
+      '<a href="' + fileUrl(ch.md) + '" title="Markdown source: ' + (ch.md_source || 'structured') + '">MD</a></td>';
     table.appendChild(tr);
   }
   document.getElementById('zip').href = 'jobs/' + jobId + '/zip';
