@@ -92,33 +92,56 @@ def _textless_pages(doc: fitz.Document) -> list[int]:
     ]
 
 
-def ensure_text_layer(pdf_path: Path, work_dir: Path, on_progress) -> Path:
+def ensure_text_layer(
+    pdf_path: Path, work_dir: Path, on_progress, redo_ocr: bool = False
+) -> Path:
     """Give scanned pages a text layer so the rest of the pipeline works.
 
-    Pages that already have text are left untouched (ocrmypdf --skip-text),
-    so this handles both fully scanned books and hybrids where only some
-    pages lack text. A handful of textless pages (blanks, photo plates) is
-    normal and not worth an OCR pass. Returns ``pdf_path`` unchanged or the
-    path of the OCR'd copy in ``work_dir``.
+    Default mode OCRs only the pages that have no text; existing text
+    layers (and born-digital pages) are left untouched. A handful of
+    textless pages (blanks, photo plates) is normal and not worth a pass.
+
+    ``redo_ocr`` additionally replaces existing *invisible* OCR layers on
+    scan pages with a fresh Tesseract pass (ocrmypdf --redo-ocr) — old
+    scans often carry decades-old OCR that modern Tesseract beats easily.
+    Born-digital visible text is never touched, and books with no scan
+    pages skip the pass entirely.
+
+    Returns ``pdf_path`` unchanged or the path of the OCR'd copy in
+    ``work_dir``.
     """
     with fitz.open(pdf_path) as doc:
         page_count = doc.page_count
         missing = _textless_pages(doc)
-    if len(missing) < max(MIN_OCR_PAGES, page_count // 50):
+        sample = list(range(0, page_count, max(1, page_count // 30)))
+        scan_frac = sum(_is_scan_page(doc[p]) for p in sample) / len(sample)
+
+    # A few full-page images are just plates in a born-digital book; redo
+    # mode only makes sense when the book is substantially a scan. Anything
+    # else falls through to the default targeted-OCR logic.
+    if redo_ocr and scan_frac >= 0.3:
+        mode_args = ["--redo-ocr"]
+        stage = (
+            f"Re-running OCR on all {page_count} pages — roughly 3s per page, "
+            "so a big book can take half an hour. Safe to close this page; "
+            "the job keeps running…"
+        )
+    elif len(missing) >= max(MIN_OCR_PAGES, page_count // 50):
+        # Name the pages explicitly: --skip-text would skip any page
+        # containing even a stray fragment of text (a page number, a
+        # running header), which is exactly what half-OCR'd scans have
+        # on their unreadable pages.
+        mode_args = ["--force-ocr", "--pages", _page_ranges(missing)]
+        stage = f"Running OCR on {len(missing)} scanned pages (of {page_count}) — this can take several minutes…"
+    else:
         return pdf_path
 
-    on_progress(
-        f"Running OCR on {len(missing)} scanned pages (of {page_count}) — "
-        "this can take several minutes…"
-    )
+    on_progress(stage)
     work_dir.mkdir(parents=True, exist_ok=True)
     ocr_path = work_dir / OCR_FILENAME
-    # Name the pages explicitly: --skip-text would skip any page containing
-    # even a stray fragment of text (a page number, a running header), which
-    # is exactly what half-OCR'd scans have on their unreadable pages.
     cmd = [
         sys.executable, "-m", "ocrmypdf",
-        "--force-ocr", "--pages", _page_ranges(missing),
+        *mode_args,
         "--output-type", "pdf", "--optimize", "0", "--quiet",
         str(pdf_path), str(ocr_path),
     ]
@@ -380,6 +403,7 @@ def split_book(
     pdf_path: Path,
     out_dir: Path,
     on_progress=lambda stage: None,
+    redo_ocr: bool = False,
 ) -> dict:
     """Split ``pdf_path`` into per-chapter PDFs + Markdown in ``out_dir``.
 
@@ -392,7 +416,7 @@ def split_book(
         if probe.page_count < 2:
             raise SplitError("This PDF has fewer than 2 pages — nothing to split.")
 
-    src_path = ensure_text_layer(pdf_path, out_dir, on_progress)
+    src_path = ensure_text_layer(pdf_path, out_dir, on_progress, redo_ocr=redo_ocr)
     doc = fitz.open(src_path)
     try:
         on_progress("Detecting chapters…")

@@ -65,6 +65,15 @@ Books come in three flavors, and all three work:
   page list computed by the app — ocrmypdf's own `--skip-text` would skip
   any page carrying even a stray header fragment).
 
+**Re-OCR toggle:** old scans often carry decades-old OCR layers full of
+typos (`Cayley-Hanulton`, `DIAGOI\JALIU,TIOI\I`). Checking *"Re-OCR scanned
+pages"* replaces invisible OCR layers with a fresh Tesseract pass
+(`--redo-ocr`) — visible born-digital text is never touched, and books that
+aren't substantially scans skip the pass automatically. Budget ~3s/page:
+a 631-page textbook took ~31 minutes, and produced `Cayley-Hamilton` and
+`DIAGONALIZATION` where the original layer had garbage. The job runs in the
+background; closing the page doesn't cancel it.
+
 For scan pages, Markdown extraction uses the text layer directly instead of
 pymupdf4llm: OCR text layers are *invisible* (alpha 0), which pymupdf4llm
 drops — it would otherwise slowly re-OCR each page image with scrambled

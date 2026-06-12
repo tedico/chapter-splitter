@@ -55,6 +55,7 @@
     font: inherit; padding: 0;
   }
   .hidden { display: none; }
+  .opt { display: block; margin-top: .6rem; font-size: .85rem; color: #667; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -67,6 +68,11 @@
     <span style="font-size:.85rem">up to 200 MB</span>
     <input type="file" id="file" accept="application/pdf" class="hidden">
   </div>
+
+  <label class="opt">
+    <input type="checkbox" id="redo">
+    Re-OCR scanned pages for cleaner text (slow — up to ~30 min for a big book)
+  </label>
 
   <div id="progress" class="card hidden">
     <span class="spinner"></span><span id="stage">Uploading…</span>
@@ -136,6 +142,7 @@ async function start(file) {
   els.stage.textContent = 'Uploading ' + file.name + '…';
   const form = new FormData();
   form.append('file', file);
+  form.append('redo_ocr', document.getElementById('redo').checked);
   let res;
   try {
     res = await fetch('upload', { method: 'POST', body: form });
