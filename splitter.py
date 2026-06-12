@@ -233,8 +233,13 @@ def _from_gemini(doc: fitz.Document) -> list[Chapter]:
         "numbering, not the PDF page markers). Include only real chapters "
         "(and named parts only if the book has no chapters) — skip the "
         "preface, index, appendices listed as back matter, and the table "
-        "of contents itself.\n\n"
-        'Respond with JSON: {"chapters": [{"title": str, "printed_page": int}]}\n\n'
+        "of contents itself. Separately, report where the back matter "
+        "begins: the first section listed after the final chapter (notes, "
+        "appendix, bibliography, index), or null if the book ends with its "
+        "last chapter.\n\n"
+        "Respond with JSON: "
+        '{"chapters": [{"title": str, "printed_page": int}], '
+        '"back_matter": {"title": str, "printed_page": int} | null}\n\n'
         + head_text
     )
     try:
@@ -249,12 +254,13 @@ def _from_gemini(doc: fitz.Document) -> list[Chapter]:
             "Please try again in a few minutes."
         ) from exc
     try:
-        guesses = json.loads(response.text)["chapters"]
+        data = json.loads(response.text)
         guesses = [
             (str(g["title"]).strip(), int(g["printed_page"]))
-            for g in guesses
+            for g in data["chapters"]
             if str(g.get("title", "")).strip()
         ]
+        back_matter = data.get("back_matter")
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise SplitError(
             "AI chapter detection returned an unusable answer for this PDF."
@@ -263,6 +269,16 @@ def _from_gemini(doc: fitz.Document) -> list[Chapter]:
         raise SplitError(
             "AI chapter detection could not find a chapter structure in this PDF."
         )
+    # The back-matter start rides along as one more locate target: it caps
+    # the last chapter instead of letting it swallow the notes and index.
+    if isinstance(back_matter, dict):
+        title = str(back_matter.get("title", "")).strip()
+        try:
+            printed = int(back_matter["printed_page"])
+        except (KeyError, TypeError, ValueError):
+            printed = 0
+        if title and printed > 0:
+            guesses.append((title, printed))
 
     starts = _locate_chapters(doc, guesses, search_from=head_pages)
     if len(starts) < MIN_CHAPTERS:

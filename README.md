@@ -94,6 +94,14 @@ upload.pdf ──► detect chapters ──► split PDFs ──► extract Mark
                        calibrated by printed-page offset
 ```
 
+Two guards keep the AI fallback honest. Heading matches that disagree with
+the median printed-page offset by more than a few pages are treated as false
+positives (books love repeating chapter titles in their introductions) and
+re-placed by the offset instead. And Gemini also reports where the back
+matter begins (notes, bibliography, index), so the final chapter ends there
+instead of swallowing the rest of the book — the back matter comes out as
+its own labeled chapter.
+
 - **Backend:** FastAPI ([main.py](main.py)) + PyMuPDF ([splitter.py](splitter.py))
 - **Frontend:** a single static page ([static/index.html](static/index.html))
   that uploads, polls `GET /jobs/{id}`, and renders download links
